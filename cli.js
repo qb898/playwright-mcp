@@ -18,6 +18,35 @@
 const { program } = require('playwright-core/lib/utilsBundle');
 const { tools, libCli } = require('playwright-core/lib/coreBundle');
 
+// Repair known schema issue for browser_fill_form: ensure items under `fields` include
+// a `required` array containing every key in `properties` (some Playwright builds omit it).
+try {
+  const allTools = [];
+  if (tools.browserTools) allTools.push(...tools.browserTools);
+  if (tools.tools) allTools.push(...tools.tools);
+  for (const tool of allTools) {
+    const schema = tool.schema || tool;
+    const name = schema.name || tool.name;
+    if (name === 'browser_fill_form') {
+      const inputSchema = (schema.inputSchema || schema.input) ;
+      if (inputSchema && typeof inputSchema.toJSONSchema === 'function') {
+        const js = inputSchema.toJSONSchema();
+        if (js && js.properties && js.properties.fields && js.properties.fields.items) {
+          const items = js.properties.fields.items;
+          if (items.properties) {
+            const propKeys = Object.keys(items.properties);
+            items.required = Array.from(new Set([...(items.required || []), ...propKeys]));
+            // Override toJSONSchema to return the fixed schema
+            inputSchema.toJSONSchema = () => js;
+          }
+        }
+      }
+    }
+  }
+} catch (e) {
+  // Ignore; this is a best-effort runtime fix for malformed schemas in some Playwright builds.
+}
+
 if (process.argv.includes('install-browser')) {
   const argv = process.argv.map(arg => arg === 'install-browser' ? 'install' : arg);
   libCli.decorateProgram(program);
