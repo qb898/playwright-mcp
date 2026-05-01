@@ -17,37 +17,40 @@
 const { program } = require('playwright-core/lib/utilsBundle');
 const { tools, libCli } = require('playwright-core/lib/coreBundle');
 
-// Repair schema issue for form-like inputs: ensure items under `fields` include
-// a `required` array containing every key in `properties` (some Playwright builds omit it).
-// Apply fix generically to any tool that exposes `inputSchema.toJSONSchema` and
-// has `properties.fields.items.properties`.
+// OpenAI strict mode requires every property key to appear in the `required` array.
+// Some Playwright builds omit optional fields from `required`, causing HTTP 400 errors.
+// Fix: for every tool, produce the JSON schema via z.toJSONSchema(), recursively add
+// all property keys to `required`, then register the fixed schema as the Zod override
+// so the MCP server returns the corrected schema to clients.
 try {
-  const allTools = [];
-  if (tools.browserTools) allTools.push(...tools.browserTools);
-  if (tools.tools) allTools.push(...tools.tools);
+  const { z } = require('playwright-core/lib/utilsBundle');
+  // Mutates jsonSchema in place, adding all property keys to `required`.
+  function addAllToRequired(jsonSchema) {
+    if (!jsonSchema || typeof jsonSchema !== 'object') return;
+    if (jsonSchema.properties) {
+      const keys = Object.keys(jsonSchema.properties);
+      const req = new Set(Array.isArray(jsonSchema.required) ? jsonSchema.required : []);
+      keys.forEach(k => req.add(k));
+      jsonSchema.required = Array.from(req);
+      keys.forEach(k => addAllToRequired(jsonSchema.properties[k]));
+    }
+    if (jsonSchema.items) addAllToRequired(jsonSchema.items);
+  }
+  // tools.browserTools is the standard export; tools.tools may exist in future builds.
+  const allTools = [...(tools.browserTools || []), ...(tools.tools || [])];
   for (const tool of allTools) {
-    const schema = tool.schema || tool;
-    const inputSchema = (schema.inputSchema || schema.input);
-    if (!inputSchema || typeof inputSchema.toJSONSchema !== 'function')
-      continue;
+    const inputSchema = tool.schema && tool.schema.inputSchema;
+    if (!inputSchema || !inputSchema._zod) continue;
     try {
-      const js = inputSchema.toJSONSchema();
-      if (js && js.properties && js.properties.fields && js.properties.fields.items) {
-        const items = js.properties.fields.items;
-        if (items.properties) {
-          const propKeys = Object.keys(items.properties);
-          // Ensure `required` is an array that contains every property key
-          items.required = Array.from(new Set([...(Array.isArray(items.required) ? items.required : []), ...propKeys]));
-          // Override toJSONSchema to return the fixed schema
-          inputSchema.toJSONSchema = () => js;
-        }
-      }
+      const fixed = z.toJSONSchema(inputSchema);
+      addAllToRequired(fixed);
+      inputSchema._zod.toJSONSchema = () => fixed;
     } catch (e) {
-      // ignore per-tool failures and continue
+      // ignore per-tool failures
     }
   }
 } catch (e) {
-  // Ignore; this is a best-effort runtime fix for malformed schemas in some Playwright builds.
+  // Ignore; best-effort fix for malformed schemas in some Playwright builds.
 }
 
 if (process.argv.includes('install-browser')) {
