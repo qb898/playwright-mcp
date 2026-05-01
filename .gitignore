@@ -6,3 +6,6 @@ playwright-report/
 .DS_Store
 .env
 sessions/
+
+# Ignore Visual Studio workspace files
+.vs/
