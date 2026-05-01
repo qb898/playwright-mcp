@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Copyright (c) Microsoft Corporation.
  *
@@ -18,29 +17,33 @@
 const { program } = require('playwright-core/lib/utilsBundle');
 const { tools, libCli } = require('playwright-core/lib/coreBundle');
 
-// Repair known schema issue for browser_fill_form: ensure items under `fields` include
+// Repair schema issue for form-like inputs: ensure items under `fields` include
 // a `required` array containing every key in `properties` (some Playwright builds omit it).
+// Apply fix generically to any tool that exposes `inputSchema.toJSONSchema` and
+// has `properties.fields.items.properties`.
 try {
   const allTools = [];
   if (tools.browserTools) allTools.push(...tools.browserTools);
   if (tools.tools) allTools.push(...tools.tools);
   for (const tool of allTools) {
     const schema = tool.schema || tool;
-    const name = schema.name || tool.name;
-    if (name === 'browser_fill_form') {
-      const inputSchema = (schema.inputSchema || schema.input) ;
-      if (inputSchema && typeof inputSchema.toJSONSchema === 'function') {
-        const js = inputSchema.toJSONSchema();
-        if (js && js.properties && js.properties.fields && js.properties.fields.items) {
-          const items = js.properties.fields.items;
-          if (items.properties) {
-            const propKeys = Object.keys(items.properties);
-            items.required = Array.from(new Set([...(items.required || []), ...propKeys]));
-            // Override toJSONSchema to return the fixed schema
-            inputSchema.toJSONSchema = () => js;
-          }
+    const inputSchema = (schema.inputSchema || schema.input);
+    if (!inputSchema || typeof inputSchema.toJSONSchema !== 'function')
+      continue;
+    try {
+      const js = inputSchema.toJSONSchema();
+      if (js && js.properties && js.properties.fields && js.properties.fields.items) {
+        const items = js.properties.fields.items;
+        if (items.properties) {
+          const propKeys = Object.keys(items.properties);
+          // Ensure `required` is an array that contains every property key
+          items.required = Array.from(new Set([...(Array.isArray(items.required) ? items.required : []), ...propKeys]));
+          // Override toJSONSchema to return the fixed schema
+          inputSchema.toJSONSchema = () => js;
         }
       }
+    } catch (e) {
+      // ignore per-tool failures and continue
     }
   }
 } catch (e) {
