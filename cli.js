@@ -18,13 +18,18 @@ const { program } = require('playwright-core/lib/utilsBundle');
 const { tools, libCli } = require('playwright-core/lib/coreBundle');
 
 // OpenAI strict mode requires every property key to appear in the `required` array.
-// Some Playwright builds omit optional fields from `required`, causing HTTP 400 errors.
-// Fix: for every tool, produce the JSON schema via z.toJSONSchema(), recursively add
-// all property keys to `required`, then register the fixed schema as the Zod override
-// so the MCP server returns the corrected schema to clients.
+// Some Playwright builds omit optional fields (e.g. `element`) from `required`, causing
+// HTTP 400 "invalid_request_body" errors.
+//
+// Root cause: the MCP server's tools/list handler calls toMcpTool() which calls
+// zod.toJSONSchema(tool.inputSchema).  z.toJSONSchema is a non-configurable getter in
+// utilsBundle and cannot be monkey-patched.  Instead, we wrap
+// Server.prototype.setRequestHandler so that the tools/list response is post-processed
+// to add every property key to `required` before the schema reaches the client.
 try {
-  const { z } = require('playwright-core/lib/utilsBundle');
-  // Mutates jsonSchema in place, adding all property keys to `required`.
+  const { Server } = require('playwright-core/lib/utilsBundle');
+  // Mutates a JSON Schema object in place: every key in `properties` is added to
+  // `required`, recursively, so OpenAI strict mode accepts the schema.
   function addAllToRequired(jsonSchema) {
     if (!jsonSchema || typeof jsonSchema !== 'object') return;
     if (jsonSchema.properties) {
@@ -34,21 +39,31 @@ try {
       jsonSchema.required = Array.from(req);
       keys.forEach(k => addAllToRequired(jsonSchema.properties[k]));
     }
-    if (jsonSchema.items) addAllToRequired(jsonSchema.items);
-  }
-  // tools.browserTools is the standard export; tools.tools may exist in future builds.
-  const allTools = [...(tools.browserTools || []), ...(tools.tools || [])];
-  for (const tool of allTools) {
-    const inputSchema = tool.schema && tool.schema.inputSchema;
-    if (!inputSchema || !inputSchema._zod) continue;
-    try {
-      const fixed = z.toJSONSchema(inputSchema);
-      addAllToRequired(fixed);
-      inputSchema._zod.toJSONSchema = () => fixed;
-    } catch (e) {
-      // ignore per-tool failures
+    if (jsonSchema.items) {
+      if (Array.isArray(jsonSchema.items)) {
+        jsonSchema.items.forEach(addAllToRequired);
+      } else {
+        addAllToRequired(jsonSchema.items);
+      }
     }
   }
+  // Wrap setRequestHandler so that any handler returning a `tools` array has its
+  // inputSchema objects fixed before being sent to clients.
+  const origSetRequestHandler = Server.prototype.setRequestHandler;
+  Server.prototype.setRequestHandler = function(schema, handler) {
+    const wrappedHandler = async (...args) => {
+      const result = await handler(...args);
+      if (result && Array.isArray(result.tools)) {
+        for (const tool of result.tools) {
+          if (tool.inputSchema && typeof tool.inputSchema === 'object') {
+            addAllToRequired(tool.inputSchema);
+          }
+        }
+      }
+      return result;
+    };
+    return origSetRequestHandler.call(this, schema, wrappedHandler);
+  };
 } catch (e) {
   // Ignore; best-effort fix for malformed schemas in some Playwright builds.
 }
