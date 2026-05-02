@@ -30,14 +30,22 @@ try {
   const { Server } = require('playwright-core/lib/utilsBundle');
   // Mutates a JSON Schema object in place: every key in `properties` is added to
   // `required`, recursively, so OpenAI strict mode accepts the schema.
+  // Also removes keywords not permitted by OpenAI (e.g. `propertyNames`).
   function addAllToRequired(jsonSchema) {
     if (!jsonSchema || typeof jsonSchema !== 'object') return;
+    // OpenAI does not support `propertyNames`; remove it.
+    // (JSON object keys are always strings, so constraining them to `type: string`
+    // is a no-op semantically – `additionalProperties` is retained for value typing.)
+    delete jsonSchema.propertyNames;
     if (jsonSchema.properties) {
       const keys = Object.keys(jsonSchema.properties);
       const req = new Set(Array.isArray(jsonSchema.required) ? jsonSchema.required : []);
       keys.forEach(k => req.add(k));
       jsonSchema.required = Array.from(req);
       keys.forEach(k => addAllToRequired(jsonSchema.properties[k]));
+    }
+    if (jsonSchema.additionalProperties && typeof jsonSchema.additionalProperties === 'object') {
+      addAllToRequired(jsonSchema.additionalProperties);
     }
     if (jsonSchema.items) {
       if (Array.isArray(jsonSchema.items)) {
